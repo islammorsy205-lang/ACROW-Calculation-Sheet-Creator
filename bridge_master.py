@@ -6,6 +6,7 @@
 # - 3-Zone Soldier FEA Checks (Cantilever, Web, Bottom Slab).
 # - Fixed 18mm Plywood & Detailed Secondary Beam Spans (No Reactions).
 # - Custom Acrow Formatting (Red SAFE text, SHORBRACE TABLE FORM cover).
+# - Detailed Push Pull types extraction & exact Acrow Report Styles.
 # ==============================================================================
 
 import streamlit as st
@@ -205,6 +206,7 @@ def add_reference_line(doc_obj, item_name, ds_map):
     p_ref.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     r_ref = p_ref.add_run(f"For allowable values / technical data of {item_name}, refer to page {matched_page}")
     r_ref.font.name, r_ref.font.size, r_ref.font.italic, r_ref.font.color.rgb = 'Arial', Pt(11), True, RGBColor(0, 112, 192)
+
 # ==============================================================================
 # 2. THE STRICT DXF PARSER (Bulletproof Binary Mode)
 # ==============================================================================
@@ -215,7 +217,6 @@ def parse_dxf_bridge_cases(file_bytes, conc_density=25.0):
         
     tmp_path = ""
     try:
-        # الحل الجذري: كتابة الملف كـ بايتس أصلية (Binary) لتجنب تلف فواصل السطور في الويندوز
         with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf", mode='wb') as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
@@ -411,6 +412,7 @@ def parse_dxf_bridge_cases(file_bytes, conc_density=25.0):
         if tmp_path and os.path.exists(tmp_path):
             try: os.remove(tmp_path)
             except: pass
+
 # ==============================================================================
 # 3. MESHING & FEA MATRIX ENGINE
 # ==============================================================================
@@ -655,6 +657,7 @@ def solve_fea_engine(nodes, elements, nodal_loads, supports_list):
             el['internal'].update({'N': N_arr, 'V': V_arr, 'M': M_arr, 'D': D_arr, 'x': xs})
             
     return U, R_reactions, net_load_z
+
 # ==============================================================================
 # 4. THE BEAST OPTIMIZER 
 # ==============================================================================
@@ -827,10 +830,10 @@ def run_bridge_optimizer(base_segments, working_segments, active_seg_sections, u
     progress_bar.empty(); status_text.empty()
     if best_fallback_grid: return True, best_fallback_grid, best_fallback_struts, f"⚠️ Best possible solution applied: Max Rxn = {best_fallback_score:.2f} kN. Please review visually."
     return False, None, None, f"❌ Failed! Cannot satisfy basic stability (Uplift) with forced cantilevers."
+
 # ==============================================================================
 # 5. PLOTTING ENGINE & WORD REPORT (Aesthetic Diagrams & Distributed Checks)
 # ==============================================================================
-
 def draw_advanced_reaction_arrow(ax, node_x, node_z, force_mag, axis_nx, axis_nz, target_rxn=54.4):
     if abs(force_mag) < 0.001: return
     arr_L = 0.5  
@@ -1031,327 +1034,6 @@ def generate_multi_case_report(cases_data, proj_info):
     if os.path.exists("Acrow_Template.docx"): doc = Document("Acrow_Template.docx")
     else: doc = Document()
 
-    # 1. إعداد الـ Cover Page مع اسم السيستم
-    system_title = "SHORBRACE TABLE FORM" # كما طلبت
-    for p in doc.paragraphs: 
-        if p.text and "CALCULATION SHEET FOR" in p.text.upper():
-            # استبدال وتوحيد الخط واسم السيستم
-            for r in p.runs: r.text = ""
-            run = p.add_run(system_title)
-            run.font.name, run.font.size, run.font.bold, run.font.color.rgb = 'Arial', Pt(16), True, RGBColor(255,255,255)
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
-    for tbl in doc.tables:
-        for row in tbl.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs: 
-                    if p.text and "CALCULATION SHEET FOR" in p.text.upper():
-                        for r in p.runs: r.text = ""
-                        run = p.add_run(system_title)
-                        run.font.name, run.font.size, run.font.bold, run.font.color.rgb = 'Arial', Pt(16), True, RGBColor(255,255,255)
-                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    replacements = {"[PROJECT_NAME]": proj_info.get("proj_name", ""), "[CONTRACTOR]": proj_info.get("contractor", ""), "[CALC_SUBJECT]": proj_info.get("calc_sub", ""), "[SYSTEM_NAME]": proj_info.get("sys_name", ""), "[PROJ_NO]": proj_info.get("proj_no", ""), "[DATE]": proj_info.get("date_val", ""), "[CALC_BY]": proj_info.get("calc_by", ""), "[CHK_BY]": proj_info.get("chk_by", ""), "[REV]": "00"}
-    for p in doc.paragraphs:
-        if "[COVER_IMAGE]" in p.text:
-            for r in p.runs: r.text = r.text.replace("[COVER_IMAGE]", "")
-            if proj_info.get("cover_img") and os.path.exists(proj_info.get("cover_img")): p.add_run().add_picture(proj_info.get("cover_img"), width=Cm(15.0))
-        for k, v in replacements.items():
-            if k in p.text: p.text = p.text.replace(k, str(v))
-    for sec in doc.sections:
-        for hf in [sec.header, sec.first_page_header, sec.footer, sec.first_page_footer]:
-            if hf:
-                for tbl in hf.tables:
-                    for row in tbl.rows:
-                        for cell in row.cells:
-                            for p in cell.paragraphs:
-                                for k, v in replacements.items():
-                                    if k in p.text: p.text = p.text.replace(k, str(v))
-
-    doc.add_page_break()
-
-    # 2. بناء الفهرس الديناميكي (Dynamic Paging)
-    insert_blue_banner(doc, "INDEX OF CONTENTS", font_size=16)
-    def get_pdf_page_count_safe(pdf_path):
-        try:
-            pdf_d = fitz.open(pdf_path)
-            c = len(pdf_d)
-            pdf_d.close()
-            return c
-        except: return 1
-
-    ds_page_map = {}
-    current_page = 4 
-    data_sheets = proj_info.get("data_sheets", [])
-    if data_sheets:
-        for f in data_sheets:
-            if os.path.exists(f):
-                p_count = get_pdf_page_count_safe(f)
-                bname = os.path.basename(f).replace('.pdf', '')
-                ds_page_map[bname] = f"{current_page}" if p_count == 1 else f"{current_page}-{current_page + p_count - 1}"
-                current_page += p_count
-
-    def add_line(text, bold=False, size=12, italic=False, color=None, align='left', underline=False):
-        p = doc.add_paragraph()
-        if align == 'center': p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        else: force_ltr_left(p)
-        r = p.add_run(text)
-        r.font.name, r.font.size, r.font.bold, r.font.italic, r.font.rtl, r.underline = 'Arial', Pt(size), bold, italic, False, underline
-        if color: r.font.color.rgb = color
-        return p
-
-    add_heading_14(doc, "1. Formwork Materials Technical Data:")
-    idx_c = 1
-    for k, v in ds_page_map.items():
-        clean_k = re.sub(r'(?i)data\s*sheet\s*for\s*', '', k).strip()
-        add_line(f"   1.{idx_c} Datasheet for Data Sheet for {clean_k} ........................................ Page {v}", size=11)
-        idx_c += 1
-
-    doc.add_paragraph()
-    add_heading_14(doc, "2. Design Loads:")
-    design_pdf = "Design_Loads_BS.pdf" if "BS" in proj_info.get("ref_code", "") and os.path.exists("Design_Loads_BS.pdf") else ("Design_Loads_ACI.pdf" if "ACI" in proj_info.get("ref_code", "") and os.path.exists("Design_Loads_ACI.pdf") else None)
-    if design_pdf:
-        p_count = get_pdf_page_count_safe(design_pdf)
-        design_loads_page = f"{current_page}" if p_count == 1 else f"{current_page}-{current_page + p_count - 1}"
-        add_line(f"   2.1 Design Loads .................................................... Page {design_loads_page}", size=11)
-        current_page += p_count
-
-    doc.add_paragraph()
-    add_heading_14(doc, "3. Formwork Elements Calculations:")
-    for i_idx, case in enumerate(cases_data): 
-        tbl_id_clean = str(case['title'].upper()).replace("TABLE", "").strip()
-        add_line(f"   3.{i_idx+1} Elements Calculation for Table T{tbl_id_clean}", size=11)
-        if case.get('local_params'):
-            add_line(f"        1- Plywood ({case['local_params'].get('ply_type', '18mm')})", size=10)
-            add_line(f"        2- Secondary Decking ({case['local_params'].get('sec_type', 'Timber H20')})", size=10)
-        add_line(f"        3- Main Decking", size=10)
-        add_line(f"        4- Push Pull Struts", size=10)
-        add_line(f"        5- Support / Shoring", size=10)
-        doc.add_paragraph()
-
-    doc.add_page_break()
-
-    # 3. Regulations & Technical Data
-    insert_blue_banner(doc, "REGULATIONS AND STANDARDS", font_size=16)
-    doc.add_paragraph()
-    if "BS" in proj_info.get("ref_code", ""): 
-        for txt in ["1- BS 5975-1996: FORMWORK FOR CONCRETE", "2- BS 5975-2008: FORMWORK FOR CONCRETE", "3- FORMWORK A GUIDE TO A GOOD PRACTICE", "4- WISA®-FORM PLYWOOD.", "5- THE SAUDI BUILDING CODE (SBC) 2024"]: add_eq(doc, txt)
-    else: 
-        for txt in ["1- ACI 347R-14 ....... GUIDE TO FORMWORK FOR CONCRETE.", "2- ACI SP-4 ......... FORMWORK FOR CONCRETE.", "3- WISA®-FORM PLYWOOD.", "4- THE SAUDI BUILDING CODE (SBC) 2024"]: add_eq(doc, txt)
-    
-    if data_sheets:
-        doc.add_page_break()
-        insert_blue_banner(doc, "FORMWORK MATERIALS TECHNICAL DATA", font_size=14)
-        for f in data_sheets:
-            if os.path.exists(f): append_pdf_stream_to_word(f, doc, is_path=True, max_width_cm=17.5, max_height_cm=24.0, add_border=True, reduce_first_page=True)
-    
-    if design_pdf: 
-        doc.add_page_break()
-        insert_blue_banner(doc, "DESIGN LOADS FOR BRIDGE DECK SLAB", font_size=14)
-        append_pdf_stream_to_word(design_pdf, doc, is_path=True, max_width_cm=17.5, max_height_cm=24.0, add_border=True, reduce_first_page=True)
-
-    # 4. 🎯 جسم النوتة الحسابية (الترابيزات والتوزيع الاستراتيجي للدياجرامات)
-    for case in cases_data:
-        doc.add_page_break()
-        tbl_id_clean = str(case['title'].upper()).replace("TABLE", "").strip()
-        insert_blue_banner(doc, "FORMWORK TABLE DESIGN", font_size=16)
-        doc.add_paragraph()
-        add_line(f"BRIDGE DECK SLAB TABLE T{tbl_id_clean}:", bold=True, size=14, underline=False)
-        doc.add_paragraph()
-
-        # أ. جدول الداتا الوصفية (Descriptive Data)
-        lp = case.get('local_params', {})
-        if lp:
-            add_line("Cross Section Descriptive Data:", bold=True, size=12, underline=True)
-            t_data = doc.add_table(rows=5, cols=2)
-            t_data.alignment = WD_TABLE_ALIGNMENT.CENTER
-            desc_data = [
-                ("Total Cross Section Depth", f"{lp.get('cs_depth', 0.0):.2f} m"),
-                ("Top Slab Thickness", f"{lp.get('top_ts', 0.0):.2f} m"),
-                ("Bottom Slab Thickness", f"{lp.get('bot_ts', 0.0):.2f} m"),
-                ("Web Concrete Thickness", f"{lp.get('web_ts', 0.0):.2f} m"),
-                ("Loaded Width (Soldier Spacing)", f"{case.get('loaded_width_curr', 1.30):.2f} m")
-            ]
-            for i, (k, v) in enumerate(desc_data):
-                row_cells = t_data.rows[i].cells
-                row_cells[0].text, row_cells[1].text = k, v
-                for j in range(2):
-                    tcPr = row_cells[j]._element.get_or_add_tcPr(); shd = OxmlElement('w:shd'); shd.set(qn('w:fill'), 'F2F2F2'); tcPr.append(shd)
-                    for p in row_cells[j].paragraphs:
-                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        for r in p.runs: r.font.name, r.font.size = 'Arial', Pt(11)
-            doc.add_paragraph()
-
-        if 'calc_details' in case and len(case['calc_details']) > 0:
-            add_line("1) Dead Load:", bold=True, size=12, underline=True)
-            add_line("Equation Used: Load W (kN/m) = [Area (m2) × Density (kN/m3) × Loaded Width (m)] / Length (m)", size=10, italic=True)
-            
-            table_ld = doc.add_table(rows=len(case['calc_details'])+1, cols=4)
-            table_ld.alignment = WD_TABLE_ALIGNMENT.CENTER
-            hdr_cells = table_ld.rows[0].cells
-            for i, text in enumerate(["Segment", "Length (m)", "Area (m2)", "Load W (kN/m)"]):
-                hdr_cells[i].text = text
-                tcPr = hdr_cells[i]._element.get_or_add_tcPr()
-                shd = OxmlElement('w:shd'); shd.set(qn('w:fill'), '1F497D'); tcPr.append(shd)
-                for p in hdr_cells[i].paragraphs:
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for r in p.runs: r.font.name, r.font.size, r.font.bold, r.font.color.rgb = 'Arial', Pt(12), True, RGBColor(255,255,255)
-            
-            for i, r_data in enumerate(case['calc_details']):
-                row_cells = table_ld.rows[i+1].cells
-                row_cells[0].text, row_cells[1].text = str(r_data['segment']), f"{r_data['length']:.2f}"
-                row_cells[2].text, row_cells[3].text = f"{r_data['area']:.2f}", f"{r_data['load_w']:.2f}"
-                for cell in row_cells:
-                    tcPr = cell._element.get_or_add_tcPr(); shd = OxmlElement('w:shd'); shd.set(qn('w:fill'), 'F2F2F2'); tcPr.append(shd)
-                    for p in cell.paragraphs:
-                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        for r in p.runs: r.font.name, r.font.size = 'Arial', Pt(11)
-            doc.add_paragraph()
-            
-            base_ll = float(case.get('base_live_load', 2.90))
-            current_tab_width = float(case.get('loaded_width_curr', 1.30))
-            ll_w_calc = base_ll * current_tab_width
-            if ll_w_calc > 0:
-                add_line("2) Live Load:", bold=True, size=12, underline=True)
-                add_line(f"- W1 = live load x Loaded Width by one Soldier = {base_ll:.2f} x {current_tab_width:.2f} = {ll_w_calc:.2f} kN/m.", size=12)
-            doc.add_paragraph()
-            
-            if 'DL' in case.get('img_bufs', {}):
-                add_line("Dead Load Distribution Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
-                p_dl = doc.add_paragraph(); p_dl.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_dl.add_run().add_picture(io.BytesIO(case['img_bufs']['DL']), width=Cm(16.5))
-            if 'LL' in case.get('img_bufs', {}):
-                add_line("Live Load Distribution Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
-                p_ll = doc.add_paragraph(); p_ll.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_ll.add_run().add_picture(io.BytesIO(case['img_bufs']['LL']), width=Cm(16.5))
-
-        # ج. التشيكات الموضعية (Local Checks - Fixed Plywood & Detailed Secondary)
-        if lp:
-            LL = float(case.get('base_live_load', 2.90))
-            FW = 0.5 
-            ply_type = "18mm Plywood"
-            sec_type = lp.get('sec_type', 'Timber H20')
-            
-            for part_name, ts, s_spc, m_spc, sec_L, sec_cant in [
-                ("Bottom Slab", lp.get('bot_ts', 0), lp.get('sec_spc_bot', 0), lp.get('main_spc_bot', 0), lp.get('sec_l_bot', 2.5), lp.get('sec_cant_bot', 0.65)),
-                ("Web", lp.get('web_ts', 0), lp.get('sec_spc_web', 0), lp.get('main_spc_web', 0), lp.get('sec_l_web', 2.5), lp.get('sec_cant_web', 0.65))
-            ]:
-                if ts <= 0.01 or s_spc <= 0.01 or m_spc <= 0.01: continue
-                
-                doc.add_page_break()
-                insert_blue_banner(doc, f"CHECK FORMWORK ELEMENTS UNDER {part_name.upper()} (Depth = {ts:.2f}m)", font_size=14)
-                w_tot = 25.0 * ts + LL + FW
-                
-                add_heading_14(doc, f"1. Plywood {ply_type}:")
-                add_eq(doc, f"W_plywood = {w_tot:.2f} KN/m²")
-                add_eq(doc, f"Max Spacing = {s_spc:.2f} m\n")
-                
-                add_eq(doc, "Check for moment:", bold=True)
-                M_ply = (w_tot * (s_spc**2)) / 10
-                Z_req = (M_ply * 100) / 3.41
-                ply_mall = 54.0 
-                add_eq(doc, f"M = W * L² / 10 = {w_tot:.2f} * ({s_spc:.2f})² / 10 = {M_ply:.2f} KN.m")
-                add_eq(doc, f"Z_req = M * 100 / 3.41 = {M_ply:.2f} * 100 / 3.41 = {Z_req:.2f} cm³")
-                add_red_safe_check(doc, None, Z_req, ply_mall, "cm³")
-                
-                E_ply, I_ply = 74.52, 48.60 
-                D_ply = (0.0068 * w_tot * (s_spc*100)**4) / (100 * E_ply * I_ply)
-                all_ply_d = (s_spc*1000)/300
-                add_eq(doc, "\nCheck for deflection:", bold=True)
-                add_eq(doc, f"D = 0.0068 * W * L⁴ / (E * I) = 0.0068 * {w_tot:.2f} * ({s_spc*100:.1f})⁴ / (100 * {E_ply:.2f} * {I_ply:.1f}) = {D_ply:.2f} mm")
-                add_red_safe_check(doc, None, D_ply, all_ply_d, "mm", f"Allowable = L/300 = {all_ply_d:.2f} mm")
-                add_reference_line(doc, "Plywood", ds_page_map)
-                
-                doc.add_page_break()
-                add_heading_14(doc, f"2. Secondary Decking {sec_type}:")
-                add_eq(doc, f"- Secondary Beam length = {sec_L:.2f} m")
-                add_eq(doc, f"- Max. spacing between main decking = {m_spc:.2f} m")
-                add_eq(doc, f"- Max. spacing between Secondary decking = {s_spc:.2f} m")
-                w_sec = w_tot * s_spc
-                add_eq_highlight(doc, f"- W_sec = {w_tot:.2f} x {s_spc:.2f} = ", f"{w_sec:.2f} KN/m'")
-                
-                prop_s = SECTIONS_DB.get(sec_type, SECTIONS_DB.get('Timber H20', {'E':92.45, 'I':4613.0, 'Mall':5.0, 'Qall':11.0}))
-                num_spans = max(1, int(round((sec_L - 2*sec_cant) / m_spc)))
-                s_supports = [sec_cant + i*m_spc for i in range(num_spans+1)]
-                s_loads = [{'type': 'linear', 'w1': w_sec, 'w2': w_sec, 'x1': 0.0, 'x2': sec_L}]
-                
-                s_sketch_bytes = draw_system_sketch(sec_L, s_supports, s_loads, transparent_bg=True)
-                p_sk = doc.add_paragraph(); p_sk.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_sk.add_run().add_picture(io.BytesIO(s_sketch_bytes), width=Cm(15.0))
-                add_centered_text(doc, "Load Assignment & Spans", size=12, color=RGBColor(100,100,100))
-                
-                add_eq(doc, "\nMaximum loads & deflections from attached Program Results:", underline=True)
-                s_img_bytes, s_M, s_V, s_D, _, _, s_Dtxt = generate_acrow_diagrams(
-                    sec_type, sec_L, s_supports, s_loads, prop_s['E'], prop_s['I'], prop_s['Mall'], prop_s['Qall'], Rall=None, transparent_bg=False
-                )
-                
-                add_red_safe_check(doc, "Check for Moment", s_M, prop_s['Mall'], "KN.m")
-                add_red_safe_check(doc, "Check for Shear", s_V, prop_s['Qall'], "KN")
-                add_red_safe_check(doc, "Check for deflection", s_D, float(s_Dtxt.split('=')[-1].replace('mm','')), "mm", f"{s_Dtxt}")
-                add_reference_line(doc, sec_type, ds_page_map)
-                
-                doc.add_page_break()
-                p_s = doc.add_paragraph(); p_s.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_s.add_run().add_picture(io.BytesIO(s_img_bytes), width=Cm(16.5))
-                add_centered_text(doc, f"Analysis Diagrams for Secondary Beam ({sec_type})", size=12)
-
-        if 'global_checks' in case:
-            gc = case['global_checks']
-            doc.add_page_break()
-            insert_blue_banner(doc, "GLOBAL STRUCTURAL ELEMENTS CHECK (FEA)", font_size=16)
-            doc.add_paragraph()
-            
-            # 🎯 3. Main Soldier (مفصل لـ 3 مناطق) + M, V Diagrams
-            add_heading_14(doc, "3. Main Decking Soldier Beams:")
-            add_eq(doc, "Maximum loads & deflections from attached Program Results:", underline=True)
-            
-            if 'soldier_zones' in gc:
-                for zone, z_data in gc['soldier_zones'].items():
-                    if z_data['m'] > 0.01 or z_data['v'] > 0.01:
-                        add_line(f"➤ Check at {zone} zone:", bold=True, size=11, color=RGBColor(0, 112, 192))
-                        add_red_safe_check(doc, "Moment", z_data['m'], gc.get('soldier_m_all', 13.1), "KN.m")
-                        add_red_safe_check(doc, "Shear", z_data['v'], gc.get('soldier_v_all', 100.8), "KN")
-                        doc.add_paragraph()
-            else:
-                add_red_safe_check(doc, "Check for Moment", gc.get('soldier_m', 0), gc.get('soldier_m_all', 13.1), "KN.m")
-                add_red_safe_check(doc, "Check for Shear", gc.get('soldier_v', 0), gc.get('soldier_v_all', 100.8), "KN")
-                
-            doc.add_paragraph()
-            if 'M' in case.get('img_bufs', {}):
-                add_line("Bending Moment Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
-                p_m = doc.add_paragraph(); p_m.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_m.add_run().add_picture(io.BytesIO(case['img_bufs']['M']), width=Cm(16.5))
-            if 'V' in case.get('img_bufs', {}):
-                add_line("Shear Force Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
-                p_v = doc.add_paragraph(); p_v.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_v.add_run().add_picture(io.BytesIO(case['img_bufs']['V']), width=Cm(16.5))
-            
-            # 🎯 4. Push-Pull Struts + Axial Diagram
-            if gc.get('max_strut_N', 0) > 0.1:
-                doc.add_page_break()
-                add_heading_14(doc, "4. Push Pull Struts:")
-                add_red_safe_check(doc, "Axial Force (N)", gc.get('max_strut_N', 0), gc.get('strut_allow', 30.0), "KN")
-                doc.add_paragraph()
-                if 'N' in case.get('img_bufs', {}):
-                    add_line("Axial Force Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
-                    p_n = doc.add_paragraph(); p_n.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_n.add_run().add_picture(io.BytesIO(case['img_bufs']['N']), width=Cm(16.5))
-            
-            # 🎯 5. Shoring System + Reaction Diagram
-            doc.add_page_break()
-            add_heading_14(doc, "5. Shoring System / Supports:")
-            add_eq(doc, f"- Load on Support = Max. Reaction from Main Beam = {gc.get('max_rxn', 0):.2f} KN")
-            add_red_safe_check(doc, "Check for Support", gc.get('max_rxn', 0), gc.get('rxn_allow', 54.4), "KN")
-            doc.add_paragraph()
-            if 'R' in case.get('img_bufs', {}):
-                add_line("Reactions Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
-                p_r = doc.add_paragraph(); p_r.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_r.add_run().add_picture(io.BytesIO(case['img_bufs']['R']), width=Cm(16.5))
-                
-    out = io.BytesIO()
-    doc.save(out)
-    return out
-# =========================================================
-# 6. WORD REPORT GENERATOR (The Ultimate Distributed Sheet)
-# =========================================================
-def generate_multi_case_report(cases_data, proj_info):
-    import fitz  
-    if os.path.exists("Acrow_Template.docx"): doc = Document("Acrow_Template.docx")
-    else: doc = Document()
-
-    # 1. إعداد الـ Cover Page مع اسم السيستم (التصميم الاحترافي المخصص)
     system_title = "SHOREBRACE TABLE FORM SYSTEM"
     for p in doc.paragraphs: 
         if p.text and "CALCULATION SHEET FOR" in p.text.upper():
@@ -1378,7 +1060,6 @@ def generate_multi_case_report(cases_data, proj_info):
             if proj_info.get("cover_img") and os.path.exists(proj_info.get("cover_img")): 
                 p.add_run().add_picture(proj_info.get("cover_img"), width=Cm(15.0))
             
-            # 🎯 تصميم الكفر بيج المخصص أسفل الصورة (كما طلبت تماماً)
             p_proj = doc.add_paragraph()
             p_proj.alignment = WD_ALIGN_PARAGRAPH.CENTER
             r_proj = p_proj.add_run(f"\n{proj_info.get('proj_name', 'Acrow Mega Project')}")
@@ -1416,7 +1097,6 @@ def generate_multi_case_report(cases_data, proj_info):
 
     doc.add_page_break()
 
-    # 2. بناء الفهرس الديناميكي (Dynamic Paging)
     insert_blue_banner(doc, "INDEX OF CONTENTS", font_size=16)
     def get_pdf_page_count_safe(pdf_path):
         try:
@@ -1478,7 +1158,6 @@ def generate_multi_case_report(cases_data, proj_info):
 
     doc.add_page_break()
 
-    # 3. Regulations & Technical Data
     insert_blue_banner(doc, "REGULATIONS AND STANDARDS", font_size=16)
     doc.add_paragraph()
     if "BS" in proj_info.get("ref_code", ""): 
@@ -1497,16 +1176,13 @@ def generate_multi_case_report(cases_data, proj_info):
         insert_blue_banner(doc, "DESIGN LOADS FOR BRIDGE DECK SLAB", font_size=14)
         append_pdf_stream_to_word(design_pdf, doc, is_path=True, max_width_cm=17.5, max_height_cm=24.0, add_border=True, reduce_first_page=True)
 
-    # 4. 🎯 جسم النوتة الحسابية (الترابيزات والتوزيع الاستراتيجي للدياجرامات)
     for case in cases_data:
         doc.add_page_break()
         tbl_id_clean = str(case['title'].upper()).replace("TABLE", "").strip()
         
-        # 🎯 دمج عنوان التصميم مع رقم التربيزة في بانر واحد (بناءً على صورتك)
         insert_blue_banner(doc, f"FORMWORK DESIGN FOR BRIDGE DECK SLAB TABLE T{tbl_id_clean}", font_size=14)
         doc.add_paragraph()
 
-        # أ. جدول الداتا الوصفية (Descriptive Data)
         lp = case.get('local_params', {})
         if lp:
             add_line("Cross Section Descriptive Data:", bold=True, size=12, underline=True)
@@ -1570,12 +1246,11 @@ def generate_multi_case_report(cases_data, proj_info):
                 add_line("Live Load Distribution Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
                 p_ll = doc.add_paragraph(); p_ll.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_ll.add_run().add_picture(io.BytesIO(case['img_bufs']['LL']), width=Cm(16.5))
 
-        # ج. التشيكات الموضعية (Local Checks - Fixed Plywood & Detailed Secondary)
         if lp:
             LL = float(case.get('base_live_load', 2.90))
             FW = 0.5 
             ply_type_raw = case.get('local_params', {}).get('ply_type', '18mm Plywood')
-            ply_type_clean = ply_type_raw.replace(' Plywood', '') # لمنع التكرار
+            ply_type_clean = ply_type_raw.replace(' Plywood', '') 
             sec_type = lp.get('sec_type', 'Timber H20')
             
             for part_name, ts, s_spc, m_spc, sec_L, sec_cant in [
@@ -1585,7 +1260,6 @@ def generate_multi_case_report(cases_data, proj_info):
                 if ts <= 0.01 or s_spc <= 0.01 or m_spc <= 0.01: continue
                 
                 doc.add_page_break()
-                # 🎯 إزالة البانر الأزرق وجعله عنوان عادي (بناءً على طلبك)
                 add_line(f"CHECK FORMWORK ELEMENTS UNDER {part_name.upper()} (Depth = {ts:.2f}m)", bold=True, size=14, underline=True)
                 w_tot = 25.0 * ts + LL + FW
                 
@@ -1643,24 +1317,26 @@ def generate_multi_case_report(cases_data, proj_info):
         if 'global_checks' in case:
             gc = case['global_checks']
             doc.add_page_break()
-            # 🎯 تم إزالة بانر (GLOBAL STRUCTURAL ELEMENTS CHECK)
             
-            # 🎯 3. Main Soldier (مفصل لـ 3 مناطق بترتيبك الإجباري، وبدون ألوان زرقاء)
+            # 🎯 3. Main Soldier Checks (Numbered & exact wording as requested)
             add_heading_14(doc, "3. Main Decking Soldier Beams:")
-            add_eq(doc, "Maximum loads & deflections from attached Program Results:", underline=True)
+            add_line("According to Maximum Values for Moment & Shear from attached Program Results:", color=RGBColor(192, 0, 0), size=11)
             doc.add_paragraph()
             
             if 'soldier_zones' in gc:
-                # 🎯 الترتيب الإجباري: Bottom Slab ثم Cantilever ثم Web
+                zone_idx = 1
                 for zone in ['Bottom Slab', 'Cantilever', 'Web']:
                     if zone in gc['soldier_zones']:
                         z_data = gc['soldier_zones'][zone]
                         if z_data['m'] > 0.01 or z_data['v'] > 0.01:
-                            # 🎯 إلغاء اللون الأزرق وتحويله للون الأسود العادي
-                            add_line(f"➤ Check at {zone} zone:", bold=True, size=11, color=RGBColor(0, 0, 0))
+                            zone_display = zone
+                            if zone == 'Cantilever': zone_display = 'Cantilever Slab'
+                            
+                            add_line(f"{zone_idx}. Check of Soldier at {zone_display}:", bold=True, size=11, color=RGBColor(0, 0, 0))
                             add_red_safe_check(doc, "Moment", z_data['m'], gc.get('soldier_m_all', 13.1), "KN.m")
                             add_red_safe_check(doc, "Shear", z_data['v'], gc.get('soldier_v_all', 100.8), "KN")
                             doc.add_paragraph()
+                            zone_idx += 1
             else:
                 add_red_safe_check(doc, "Check for Moment", gc.get('soldier_m', 0), gc.get('soldier_m_all', 13.1), "KN.m")
                 add_red_safe_check(doc, "Check for Shear", gc.get('soldier_v', 0), gc.get('soldier_v_all', 100.8), "KN")
@@ -1672,14 +1348,32 @@ def generate_multi_case_report(cases_data, proj_info):
                 add_line("Shear Force Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
                 p_v = doc.add_paragraph(); p_v.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_v.add_run().add_picture(io.BytesIO(case['img_bufs']['V']), width=Cm(16.5))
             
-            # 🎯 4. Push-Pull Struts (باسم النهيز الديناميكي وطوله)
-            if gc.get('max_strut_N', 0) > 0.1:
+            # 🎯 4. TILTING SYSTEM – PUSH PULL (All used types detailed)
+            if 'strut_forces_dict' in gc and len(gc['strut_forces_dict']) > 0:
                 doc.add_page_break()
-                strut_dyn_name = gc.get('strut_name', 'Push Pull Struts')
-                add_heading_14(doc, f"4. {strut_dyn_name}:")
-                add_eq(doc, f"- Strut Length = {gc.get('strut_len', 0.0):.2f} m")
-                add_red_safe_check(doc, "Axial Force (N)", gc.get('max_strut_N', 0), gc.get('strut_allow', 30.0), "KN")
+                p_st = doc.add_paragraph()
+                force_ltr_left(p_st)
+                r_st = p_st.add_run("4. TILTING SYSTEM – PUSH PULL:")
+                r_st.font.name, r_st.font.size, r_st.font.bold, r_st.underline = 'Arial', Pt(14), True, True
+                
+                p_sub = doc.add_paragraph()
+                force_ltr_left(p_sub)
+                r_sub = p_sub.add_run("Strut Axial Forces (N):")
+                r_sub.font.name, r_sub.font.size, r_sub.font.bold, r_sub.underline = 'Arial', Pt(12), True, True
                 doc.add_paragraph()
+                
+                for st_name, st_data in gc['strut_forces_dict'].items():
+                    if st_data['max_n'] > 0.01:
+                        p_name = doc.add_paragraph()
+                        force_ltr_left(p_name)
+                        r_name = p_name.add_run(f"• For Push Pull {st_name}")
+                        r_name.font.name, r_name.font.size, r_name.font.bold = 'Arial', Pt(12), True
+                        
+                        add_red_safe_check(doc, "Axial Force (N)", st_data['max_n'], st_data['allow'], "KN")
+                        doc.add_paragraph()
+                
+                add_reference_line(doc, "Push Pull", ds_page_map)
+                
                 if 'N' in case.get('img_bufs', {}):
                     add_line("Axial Force Diagram:", bold=False, size=12, color=RGBColor(192, 0, 0), underline=True)
                     p_n = doc.add_paragraph(); p_n.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_n.add_run().add_picture(io.BytesIO(case['img_bufs']['N']), width=Cm(16.5))
@@ -1702,11 +1396,6 @@ def generate_multi_case_report(cases_data, proj_info):
 # 7. MAIN STREAMLIT UI (Descriptive Inputs, 3-Zone Sweeps & The Beast)
 # ==============================================================================
 def render_bridge_module(proj_info):
-    """
-    الواجهة الرئيسية للمحرك الهندسي التفاعلي، تشمل رفع الـ DXF 
-    وبناء التابات المستقلة، وواجهة التشيكات الموضعية الدقيقة (Local Checks)، 
-    والأوبتيميزر، ووضع الإدخال اليدوي الكامل.
-    """
     st.markdown("## 🌉 Bridge Formwork (True 2D DXF + Advanced Live Editor)")
     mode = st.radio(
         "Select Input Mode:", 
@@ -1811,7 +1500,7 @@ def render_bridge_module(proj_info):
                                     st.session_state[f"alw2_{c_idx}_{i}"] = float(ld['w2'])
                             st.rerun()
 
-                        # 🎯 نافذة الداتا الوصفية والتشيكات الموضعية الدقيقة
+                        # 🎯 تعديل القيم الافتراضية للـ Web و Bottom Slab بناءً على صورتك
                         with st.expander("🧱 Cross Section & Local Checks (Plywood & Secondary)", expanded=True):
                             st.info("📝 Descriptive Data for Report:")
                             cs1, cs2 = st.columns(2)
@@ -1821,22 +1510,22 @@ def render_bridge_module(proj_info):
                             st.markdown("---")
                             st.markdown("**Under Web:**")
                             w1, w2, w3 = st.columns(3)
-                            web_ts = w1.number_input("Web Thick (m)", value=float(case.get('local_params', {}).get('web_ts', 0.50)), step=0.05, key=f"wts_{c_idx}")
-                            sec_spc_web = w2.number_input("Sec Spacing (m)", value=float(case.get('local_params', {}).get('sec_spc_web', 0.20)), step=0.05, key=f"ssw_{c_idx}")
-                            main_spc_web = w3.number_input("Main Spacing (m)", value=float(case.get('local_params', {}).get('main_spc_web', 0.90)), step=0.05, key=f"msw_{c_idx}")
+                            web_ts = w1.number_input("Web Thick (m)", value=float(case.get('local_params', {}).get('web_ts', 2.20)), step=0.05, key=f"wts_{c_idx}")
+                            sec_spc_web = w2.number_input("Sec Spacing (m)", value=float(case.get('local_params', {}).get('sec_spc_web', 0.15)), step=0.05, key=f"ssw_{c_idx}")
+                            main_spc_web = w3.number_input("Main Spacing (m)", value=float(case.get('local_params', {}).get('main_spc_web', 1.20)), step=0.05, key=f"msw_{c_idx}")
                             ws1, ws2 = st.columns(2)
                             sec_l_web = ws1.number_input("Sec Length (m)", value=float(case.get('local_params', {}).get('sec_l_web', 2.50)), step=0.1, key=f"slw_{c_idx}")
-                            sec_cant_web = ws2.number_input("Cantilever (m)", value=float(case.get('local_params', {}).get('sec_cant_web', 0.35)), step=0.05, key=f"scw_{c_idx}")
+                            sec_cant_web = ws2.number_input("Cantilever (m)", value=float(case.get('local_params', {}).get('sec_cant_web', 0.65)), step=0.05, key=f"scw_{c_idx}")
 
                             st.markdown("---")
                             st.markdown("**Under Bottom Slab:**")
                             b1, b2, b3 = st.columns(3)
-                            bot_ts = b1.number_input("Bot Thick (m)", value=float(case.get('local_params', {}).get('bot_ts', 0.80)), step=0.05, key=f"bts_{c_idx}")
-                            sec_spc_bot = b2.number_input("Sec Spacing (m)", value=float(case.get('local_params', {}).get('sec_spc_bot', 0.15)), step=0.05, key=f"ssb_{c_idx}")
-                            main_spc_bot = b3.number_input("Main Spacing (m)", value=float(case.get('local_params', {}).get('main_spc_bot', 0.60)), step=0.05, key=f"msb_{c_idx}")
+                            bot_ts = b1.number_input("Bot Thick (m)", value=float(case.get('local_params', {}).get('bot_ts', 0.25)), step=0.05, key=f"bts_{c_idx}")
+                            sec_spc_bot = b2.number_input("Sec Spacing (m)", value=float(case.get('local_params', {}).get('sec_spc_bot', 0.45)), step=0.05, key=f"ssb_{c_idx}")
+                            main_spc_bot = b3.number_input("Main Spacing (m)", value=float(case.get('local_params', {}).get('main_spc_bot', 1.20)), step=0.05, key=f"msb_{c_idx}")
                             bs1, bs2 = st.columns(2)
                             sec_l_bot = bs1.number_input("Sec Length (m)", value=float(case.get('local_params', {}).get('sec_l_bot', 2.50)), step=0.1, key=f"slb_{c_idx}")
-                            sec_cant_bot = bs2.number_input("Cantilever (m)", value=float(case.get('local_params', {}).get('sec_cant_bot', 0.35)), step=0.05, key=f"scb_{c_idx}")
+                            sec_cant_bot = bs2.number_input("Cantilever (m)", value=float(case.get('local_params', {}).get('sec_cant_bot', 0.65)), step=0.05, key=f"scb_{c_idx}")
                             
                             st.markdown("---")
                             try:
@@ -2039,7 +1728,6 @@ def render_bridge_module(proj_info):
                                 
                                 st.session_state[f'fea_cache_{c_idx}'] = {'nodes': p_nodes, 'elements': p_elems, 'R': R, 'supports': p_supps, 'loads': expanded_loads}
                                 
-                                # 🎯 الاختراع الأكبر: التفنيط المكاني للسولجر لـ 3 مناطق
                                 max_m, max_v = 0.0, 0.0
                                 soldier_mall, soldier_qall = 13.1, 100.8 
                                 
@@ -2071,27 +1759,29 @@ def render_bridge_module(proj_info):
                                             soldier_mall = sec['Mall']
                                             soldier_qall = sec['Qall']
                                             
-                                # 🎯 سحب بيانات النهيز (الاسم والطول)
-                                max_n, strut_allow = 0.0, 30.0
-                                st_name, st_len = "Push Pull Struts", 0.0
+                                # 🎯 سحب بيانات النهيز (كل نوع على حدة)
+                                strut_forces_dict = {}
                                 for el in p_elems:
                                     if el['type'] == 'truss':
+                                        st_sec = el.get('sec', 'Push Pull Strut')
                                         n_abs = np.max(np.abs(el.get('internal', {}).get('N', [0])))
-                                        if n_abs >= max_n:
-                                            max_n = n_abs
-                                            st_name = el.get('sec', 'Push Pull Struts')
-                                            st_len = el.get('L', 0.0)
-                                            try:
-                                                if st_name in STRUTS_DB: strut_allow = STRUTS_DB[st_name]['allow']
-                                            except Exception:
-                                                pass
+                                        allow_val = 30.0
+                                        try:
+                                            if st_sec in STRUTS_DB: allow_val = STRUTS_DB[st_sec]['allow']
+                                        except Exception:
+                                            pass
+                                        
+                                        if st_sec not in strut_forces_dict:
+                                            strut_forces_dict[st_sec] = {'max_n': n_abs, 'allow': allow_val}
+                                        else:
+                                            if n_abs > strut_forces_dict[st_sec]['max_n']:
+                                                strut_forces_dict[st_sec]['max_n'] = n_abs
                                         
                                 case['global_checks'] = {
                                     'soldier_m': max_m, 'soldier_m_all': soldier_mall,
                                     'soldier_v': max_v, 'soldier_v_all': soldier_qall,
                                     'soldier_zones': soldier_zones,
-                                    'max_strut_N': max_n, 'strut_allow': strut_allow,
-                                    'strut_name': st_name, 'strut_len': st_len,
+                                    'strut_forces_dict': strut_forces_dict,
                                     'max_rxn': np.max(R) if len(R) > 0 else 0, 'rxn_allow': target_rxn_ui
                                 }
                                 
